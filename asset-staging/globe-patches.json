@@ -1,0 +1,30 @@
+[
+  {
+    "file": "globe-patch-barcelona.png",
+    "bounds": {
+      "west": 0,
+      "south": 40,
+      "east": 4,
+      "north": 43
+    },
+    "size": [
+      2048,
+      1536
+    ],
+    "projection": "equirectangular EPSG:4326; north at top"
+  },
+  {
+    "file": "globe-patch-iberia-morocco.png",
+    "bounds": {
+      "west": -12,
+      "south": 30,
+      "east": 5,
+      "north": 45
+    },
+    "size": [
+      4096,
+      3614
+    ],
+    "projection": "equirectangular EPSG:4326; north at top"
+  }
+]

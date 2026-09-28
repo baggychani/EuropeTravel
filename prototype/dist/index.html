@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#161412">
+  <meta name="robots" content="noindex,nofollow">
+  <title>지인이와 나의 유럽여행</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%238bb4c2'/%3E%3Cellipse cx='16' cy='16' rx='7' ry='13' fill='none' stroke='%23f0ebdd' stroke-width='1.4'/%3E%3Cpath d='M3 16h26' stroke='%23f0ebdd' stroke-width='1.4'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./style.css">
+  <script type="importmap">{"imports":{"three":"./vendor/three.module.js"}}</script>
+</head>
+<body>
+  <div id="globe-stage" class="globe-stage">
+    <canvas id="globe" aria-label="마우스로 돌려보는 여행 지구본"></canvas>
+    <div id="map-labels" class="map-labels" aria-hidden="true"></div>
+    <div class="loading" id="loading"><span class="loading-orbit"></span><span>지구를 펼치는 중</span></div>
+    <div class="map-error" id="map-error" hidden>이 브라우저에서 지구본을 열지 못했어요.<br>다른 브라우저에서 다시 열어주세요.</div>
+  </div>
+  <h1 class="site-title">지인이와 나의 유럽여행</h1>
+  <button class="overview-button" id="overview" aria-label="여행 전체 보기"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></svg></button>
+  <section class="journey-strip" aria-label="이동 구간 선택">
+    <div class="strip-label"><span class="eyebrow">OUR JOURNEY</span></div>
+    <div class="route-stops" id="route-stops"></div>
+  </section>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

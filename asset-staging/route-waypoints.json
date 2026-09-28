@@ -1,0 +1,243 @@
+{
+  "coordinateOrder": "longitude, latitude",
+  "accuracy": "Schematic waypoints through known corridor/hubs, manually estimated coordinates; NOT measured tracks and NOT proof of the couple's exact historical route.",
+  "barcelona_montserrat": {
+    "mode": "train",
+    "sources": [
+      "https://www.fgc.cat/en/fgc-network/l-llobregat-anoia/monistrol-de-montserrat-tren/",
+      "https://www.montserratvisita.cat/en/how-to-get-there/cremallera-train"
+    ],
+    "note": "R5 from Barcelona Placa Espanya via Sant Boi, Martorell, Olesa and Monistrol. Final Monistrol→monastery assumes rack railway; could instead have been Aeri cable car. Confirm later. Return may reverse this schematic path.",
+    "waypoints": [
+      {
+        "name": "Barcelona Placa Espanya",
+        "coord": [
+          2.149,
+          41.375
+        ]
+      },
+      {
+        "name": "Sant Boi",
+        "coord": [
+          2.037,
+          41.348
+        ]
+      },
+      {
+        "name": "Quatre Camins",
+        "coord": [
+          2.008,
+          41.396
+        ]
+      },
+      {
+        "name": "Martorell",
+        "coord": [
+          1.918,
+          41.486
+        ]
+      },
+      {
+        "name": "Olesa de Montserrat",
+        "coord": [
+          1.892,
+          41.545
+        ]
+      },
+      {
+        "name": "Aeri de Montserrat area",
+        "coord": [
+          1.861,
+          41.592
+        ]
+      },
+      {
+        "name": "Monistrol de Montserrat / rack rail interchange",
+        "coord": [
+          1.851,
+          41.612
+        ]
+      },
+      {
+        "name": "Montserrat monastery",
+        "coord": [
+          1.838,
+          41.593
+        ]
+      }
+    ]
+  },
+  "casablanca_rabat": {
+    "mode": "train",
+    "sources": [
+      "https://www.oncf.ma/fr/Al-boraq"
+    ],
+    "note": "Known rail corridor; exact historical Casablanca/Rabat stations unconfirmed. Intermediate points shape the corridor and do not claim train stops.",
+    "waypoints": [
+      {
+        "name": "Casa Voyageurs area",
+        "coord": [
+          -7.591,
+          33.59
+        ]
+      },
+      {
+        "name": "Mohammedia corridor",
+        "coord": [
+          -7.385,
+          33.684
+        ]
+      },
+      {
+        "name": "Bouznika corridor",
+        "coord": [
+          -7.159,
+          33.789
+        ]
+      },
+      {
+        "name": "Skhirat corridor",
+        "coord": [
+          -7.04,
+          33.852
+        ]
+      },
+      {
+        "name": "Temara corridor",
+        "coord": [
+          -6.921,
+          33.921
+        ]
+      },
+      {
+        "name": "Rabat Agdal area",
+        "coord": [
+          -6.858,
+          33.992
+        ]
+      }
+    ]
+  },
+  "rabat_tangier": {
+    "mode": "train",
+    "sources": [
+      "https://www.oncf.ma/fr/Al-boraq"
+    ],
+    "note": "ONCF confirms Al Boraq via Rabat Agdal, Kenitra and Tangier. Northern points approximate geographic corridor only; not exact railway geometry or confirmed train type.",
+    "waypoints": [
+      {
+        "name": "Rabat Agdal area",
+        "coord": [
+          -6.858,
+          33.992
+        ]
+      },
+      {
+        "name": "Sale corridor",
+        "coord": [
+          -6.792,
+          34.075
+        ]
+      },
+      {
+        "name": "Kenitra",
+        "coord": [
+          -6.578,
+          34.251
+        ]
+      },
+      {
+        "name": "Northern corridor 1",
+        "coord": [
+          -6.48,
+          34.52
+        ]
+      },
+      {
+        "name": "Northern corridor 2",
+        "coord": [
+          -6.16,
+          34.93
+        ]
+      },
+      {
+        "name": "East of Larache",
+        "coord": [
+          -6.12,
+          35.15
+        ]
+      },
+      {
+        "name": "Asilah corridor",
+        "coord": [
+          -5.99,
+          35.47
+        ]
+      },
+      {
+        "name": "Tangier approach",
+        "coord": [
+          -5.88,
+          35.65
+        ]
+      },
+      {
+        "name": "Tanger Ville railway station area",
+        "coord": [
+          -5.787,
+          35.771
+        ]
+      }
+    ]
+  },
+  "tangier_algeciras": {
+    "mode": "ferry",
+    "sources": [
+      "https://www.tangermed-passagers.com/en/faq",
+      "https://www.balearia.com/en/routes-timetables/ferry-algeciras-tangiermed",
+      "https://helpcenter.balearia.com/hc/en-gb/articles/28188070314013-Boarding-and-Port-Access"
+    ],
+    "note": "User said Tangier→Algeciras. The regular Algeciras crossing is from Tangier Med, while Tangier city commonly connects to Tarifa with possible onward shuttle. Do not assert exact departure port. Prefer schematic city-to-city route during prototype, labelled approximate in developer notes, and confirm before final detailed animation.",
+    "schematicCityToCity": [
+      [
+        -5.8,
+        35.79
+      ],
+      [
+        -5.7,
+        35.87
+      ],
+      [
+        -5.56,
+        35.95
+      ],
+      [
+        -5.45,
+        36.03
+      ],
+      [
+        -5.434,
+        36.126
+      ]
+    ],
+    "tangierMedAlternative": [
+      [
+        -5.505,
+        35.885
+      ],
+      [
+        -5.49,
+        35.945
+      ],
+      [
+        -5.44,
+        36.03
+      ],
+      [
+        -5.434,
+        36.126
+      ]
+    ],
+    "cityToMedTransfer": "Unconfirmed; do not invent transport mode."
+  }
+}
