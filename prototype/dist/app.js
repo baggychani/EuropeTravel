@@ -1,30 +1,39 @@
 import * as THREE from 'three';
+import { PLACE_NAMES, MODE_NAMES, UI } from './text.js';
 
 /* ============================================================
- * Europe 1year — globe + routes v3
- * - 평소엔 자유 지구본 (드래그/줌 항상 가능, 애니메이션은 1회성)
- * - 선은 화면 기준 얇게 (카메라 거리 비례 보정 + 이중선)
- * - 링(원) 완전 삭제, 마커는 화면 고정 크기 점만
- * - wall-clock 재생 (탭 복귀 튐 방지), 재생 중 입력하면 즉시 중단 후 자유 조작
+ * Europe 1year - globe + routes v4
+ *
+ * Korean copy lives in text.js so this file stays ASCII-only.
+ *
+ * Line width is fixed in screen pixels: the vertex shader expands a ribbon
+ * perpendicular to the tangent in clip space, so distance cannot change it.
+ * Markers are sized the same way and share the route's altitude, so a dot
+ * never drifts away from the line that passes through it.
+ * Free zoom is capped per region by the texture density we actually ship,
+ * which is what keeps the raster from falling apart.
  * ============================================================ */
 
 const $ = (id) => document.getElementById(id);
 const R = 2;
+const FOV = 36;
+const TAN_HALF = Math.tan(THREE.MathUtils.degToRad(FOV / 2));
+const LIFT = 0.0002;          // shared surface offset for routes and dots; small enough to stay aligned on a tilted view
 const clamp = THREE.MathUtils.clamp;
 const smoother = (t) => { t = clamp(t, 0, 1); return t * t * t * (t * (t * 6 - 15) + 10); };
 const rad = Math.PI / 180;
 const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 const places = {
-  icn: { name: '인천', ll: [126.45, 37.46] },
-  bcn: { name: '바르셀로나', ll: [2.149, 41.375] },
-  mon: { name: '몬세라트', ll: [1.838, 41.593] },
-  lis: { name: '리스본', ll: [-9.139, 38.722] },
-  cas: { name: '카사블랑카', ll: [-7.591, 33.590] },
-  rab: { name: '라바트', ll: [-6.858, 33.992] },
-  tan: { name: '탕헤르', ll: [-5.787, 35.771] },
-  alg: { name: '알헤시라스', ll: [-5.434, 36.126] },
-  mlg: { name: '말라가', ll: [-4.421, 36.721] },
+  icn: { name: PLACE_NAMES.icn, ll: [126.45, 37.46] },
+  bcn: { name: PLACE_NAMES.bcn, ll: [2.149, 41.375] },
+  mon: { name: PLACE_NAMES.mon, ll: [1.838, 41.593] },
+  lis: { name: PLACE_NAMES.lis, ll: [-9.139, 38.722] },
+  cas: { name: PLACE_NAMES.cas, ll: [-7.591, 33.590] },
+  rab: { name: PLACE_NAMES.rab, ll: [-6.858, 33.992] },
+  tan: { name: PLACE_NAMES.tan, ll: [-5.787, 35.771] },
+  alg: { name: PLACE_NAMES.alg, ll: [-5.434, 36.126] },
+  mlg: { name: PLACE_NAMES.mlg, ll: [-4.421, 36.721] },
 };
 
 const montserrat = [[2.149,41.375],[2.037,41.348],[2.008,41.396],[1.918,41.486],[1.892,41.545],[1.861,41.592],[1.851,41.612],[1.838,41.593]];
@@ -46,12 +55,24 @@ const legs = [
 ];
 
 const MODE = {
-  flight: { name:'비행', color:'#dd7743' },
-  train:  { name:'기차', color:'#7f63d8' },
-  ferry:  { name:'페리', color:'#1f9e86' },
-  car:    { name:'택시', color:'#c99a3c' },
+  flight: { name: MODE_NAMES.flight, color: '#d2663a' },
+  train:  { name: MODE_NAMES.train, color: '#6b4fc9' },
+  ferry:  { name: MODE_NAMES.ferry, color: '#12806d' },
+  car:    { name: MODE_NAMES.car, color: '#b8862a' },
 };
-const HALO = '#fdfaff';
+
+/* Texture density we actually ship. Going closer than the source resolution
+ * is what makes the map look broken, so every region gets its own floor. */
+const KM_PER_UNIT = 40075 / (2 * Math.PI * R);
+const KM_PER_DEG = 111.32;
+const BLUR_TOLERANCE = 1.4;   // magnification up to this factor is not noticeable
+const GLOBAL_PX_PER_DEG = 8192 / 360;
+const PATCHES = [
+  { west: 0, south: 40, east: 4, north: 43, pxPerDeg: 2048 / 4 },
+  { west: -12, south: 30, east: 5, north: 45, pxPerDeg: 4096 / 17 },
+  { west: -15, south: 25, east: 32, north: 58, pxPerDeg: 4096 / 47 },
+  { west: 123, south: 33, east: 131, north: 40, pxPerDeg: 2048 / 8 },
+];
 
 function geo([lon, lat], radius = R) {
   return new THREE.Vector3(
@@ -59,6 +80,23 @@ function geo([lon, lat], radius = R) {
     Math.sin(lat * rad),
     -Math.cos(lat * rad) * Math.sin(lon * rad)
   ).multiplyScalar(radius);
+}
+function toLonLat(v) {
+  const n = v.clone().normalize();
+  return [Math.atan2(-n.z, n.x) / rad, Math.asin(clamp(n.y, -1, 1)) / rad];
+}
+function pxPerDegAt(v) {
+  const [lon, lat] = toLonLat(v);
+  let best = GLOBAL_PX_PER_DEG;
+  for (const p of PATCHES) {
+    if (lon >= p.west && lon <= p.east && lat >= p.south && lat <= p.north) best = Math.max(best, p.pxPerDeg);
+  }
+  return best;
+}
+// Floor is the altitude where a screen pixel becomes finer than a texture pixel
+function minAltitudeAt(v) {
+  const nativeKmPerPx = KM_PER_DEG / pxPerDegAt(v);
+  return (nativeKmPerPx * frameHeight) / (2 * TAN_HALF * KM_PER_UNIT * BLUR_TOLERANCE);
 }
 function slerp(a, b, t) {
   const angle = Math.acos(clamp(a.dot(b), -1, 1));
@@ -84,78 +122,98 @@ class TravelCurve extends THREE.Curve {
     if (this.ground) { const p = this.ground.getPoint(t); normal = geo([p.x, p.y], 1); }
     else normal = slerp(this.a, this.b, t);
     const lift = this.peak > 0 ? (1 - Math.cos(Math.PI * 2 * t)) * 0.5 : 0;
-    // 지상 노선은 표면 위로 살짝 띄워 지구 곡률에 묻히지 않게 함
-    const hug = this.peak > 0 ? 0 : 0.004;
-    return target.copy(normal).multiplyScalar(R + lift * this.peak + 0.0015 + hug);
+    return target.copy(normal).multiplyScalar(R + lift * this.peak + LIFT);
   }
 }
 
-/* ---------- 얇은 이중선: 밝은 밑선 + 진한 윗선, 굵기는 화면 기준 보정 ---------- */
-function lineMaterial(colorHex, opacity) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      radius: { value: 0.0015 },
-      color: { value: new THREE.Color(colorHex) },
-      opacity: { value: opacity },
-      head: { value: 0 },
-    },
-    vertexShader: 'uniform float radius; attribute float routeT; varying float vT; varying float vLight; void main(){ vT = routeT; vLight = .82 + .18 * abs(dot(normal, normalize(vec3(.4, 1., 1.)))); gl_Position = projectionMatrix * modelViewMatrix * vec4(position + normal * radius, 1.); }',
-    fragmentShader: 'uniform vec3 color; uniform float opacity; uniform float head; varying float vT; varying float vLight; void main(){ if (vT > head + .001) discard; gl_FragColor = vec4(color * vLight, opacity);\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}',
-    transparent: true, depthWrite: false,
-  });
-}
+/* ---------- Ribbon with a width fixed in screen pixels ----------
+ * halfW is half the line thickness in CSS pixels. The shader offsets each
+ * vertex perpendicular to the screen-space tangent, so the thickness is the
+ * same for a 9600 km flight and a 46 km train ride. */
+const screenRes = new THREE.Vector2(1, 1);
+const DIM = new THREE.Color('#9a8ec0');
+
+const RIBBON_VERT = `
+uniform float halfW;
+uniform vec2 res;
+attribute vec3 nextPos;
+attribute float side;
+attribute float routeT;
+varying float vT;
+void main(){
+  vT = routeT;
+  vec4 c = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vec4 n = projectionMatrix * modelViewMatrix * vec4(nextPos, 1.0);
+  vec2 cs = c.xy / max(abs(c.w), 1e-5);
+  vec2 ns = n.xy / max(abs(n.w), 1e-5);
+  vec2 d = (ns - cs) * res;
+  vec2 dir = length(d) < 1e-6 ? vec2(1.0, 0.0) : normalize(d);
+  vec2 perp = vec2(-dir.y, dir.x) * (halfW * side);
+  c.xy += (perp / res) * 2.0 * c.w;
+  gl_Position = c;
+}`;
+
+const RIBBON_FRAG = `
+uniform vec3 color;
+uniform float opacity;
+uniform float head;
+varying float vT;
+void main(){
+  if (vT > head + 0.0015) discard;
+  gl_FragColor = vec4(color, opacity);
+  #include <colorspace_fragment>
+}`;
 
 function makeTrail(curve, colorHex) {
-  const segments = 360, sides = 6;
-  const centers = [], normals = [], times = [], indices = [];
-  for (let i = 0; i <= segments; i++) {
-    const t = i / segments;
-    const p = curve.getPointAt(t);
-    const f = curve.getTangentAt(clamp(t, 0.0001, 0.9999));
-    const up = p.clone().normalize();
-    const right = new THREE.Vector3().crossVectors(f, up).normalize();
-    const normal = new THREE.Vector3().crossVectors(right, f).normalize();
-    for (let j = 0; j < sides; j++) {
-      const a = (j / sides) * Math.PI * 2;
-      const n = right.clone().multiplyScalar(Math.cos(a)).addScaledVector(normal, Math.sin(a));
-      centers.push(...p.toArray()); normals.push(...n.toArray()); times.push(t);
-      if (i < segments) {
-        const q = i * sides + j, r = i * sides + ((j + 1) % sides);
-        const s = (i + 1) * sides + j, u = (i + 1) * sides + ((j + 1) % sides);
-        indices.push(q, r, s, r, u, s);
-      }
-    }
+  const N = 420;
+  const pts = [];
+  for (let i = 0; i <= N; i++) pts.push(curve.getPointAt(i / N));
+  const pos = [], nxt = [], sd = [], tt = [], idx = [];
+  for (let i = 0; i <= N; i++) {
+    const p = pts[i];
+    const n = i < N ? pts[i + 1] : pts[i].clone().multiplyScalar(2).sub(pts[i - 1]);
+    for (const s of [-1, 1]) { pos.push(p.x, p.y, p.z); nxt.push(n.x, n.y, n.z); sd.push(s); tt.push(i / N); }
+    if (i < N) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
   }
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(centers, 3));
-  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
-  geometry.setAttribute('routeT', new THREE.Float32BufferAttribute(times, 1));
-  geometry.setIndex(indices);
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geometry.setAttribute('nextPos', new THREE.Float32BufferAttribute(nxt, 3));
+  geometry.setAttribute('side', new THREE.Float32BufferAttribute(sd, 1));
+  geometry.setAttribute('routeT', new THREE.Float32BufferAttribute(tt, 1));
+  geometry.setIndex(idx);
   geometry.setDrawRange(0, 0);
   geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), R + 1);
-  const haloMat = lineMaterial(HALO, 0.35);
-  const coreMat = lineMaterial(colorHex, 0.95);
-  const halo = new THREE.Mesh(geometry, haloMat); halo.frustumCulled = false;
-  const core = new THREE.Mesh(geometry, coreMat); core.frustumCulled = false;
-  const indexCount = segments * sides * 6;
-  return {
-    halo, core, geometry, haloMat, coreMat, segments, sides,
-    setProgress(p) {
-      const n = Math.floor(clamp(p, 0, 1) * segments) * sides * 6;
-      geometry.setDrawRange(0, p >= 1 ? indexCount : n);
-      haloMat.uniforms.head.value = p; coreMat.uniforms.head.value = p;
+  const material = new THREE.ShaderMaterial({
+    uniforms: {
+      halfW: { value: 0.9 },
+      res: { value: screenRes },
+      color: { value: new THREE.Color(colorHex) },
+      opacity: { value: 0.95 },
+      head: { value: 0 },
     },
-    // 화면상 같은 굵기로 보이게: 카메라 거리에 비례
-    setRadius(r) { haloMat.uniforms.radius.value = r * 2.3; coreMat.uniforms.radius.value = r; },
-    setStyle(coreOpacity, haloOpacity, dimmed) {
-      coreMat.uniforms.opacity.value = coreOpacity;
-      haloMat.uniforms.opacity.value = haloOpacity;
-      coreMat.uniforms.color.value.set(colorHex).multiplyScalar(dimmed ? 0.55 : 1);
+    vertexShader: RIBBON_VERT, fragmentShader: RIBBON_FRAG,
+    transparent: true, depthWrite: false, toneMapped: false,
+    polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.frustumCulled = false;
+  const total = N * 6;
+  return {
+    mesh, material,
+    setProgress(p) {
+      geometry.setDrawRange(0, p >= 1 ? total : Math.floor(clamp(p, 0, 1) * N) * 6);
+      material.uniforms.head.value = p;
+    },
+    setStyle(px, opacity, dimmed) {
+      material.uniforms.halfW.value = px;
+      material.uniforms.opacity.value = opacity;
+      material.uniforms.color.value.set(colorHex);
+      if (dimmed) material.uniforms.color.value.lerp(DIM, 0.5);
     },
   };
 }
 
-/* ---------- 탈것 모형 ---------- */
+/* ---------- Vehicle models ---------- */
 const materials = {
   body: new THREE.MeshStandardMaterial({ color: '#f6efe4', roughness: 0.5 }),
   trim: new THREE.MeshStandardMaterial({ color: '#c26a52', roughness: 0.6 }),
@@ -229,26 +287,27 @@ function makeCar() {
   return g;
 }
 
-/* ---------- 상태: 평소엔 자유 지구본, 애니메이션은 1회성 ---------- */
+/* ---------- State ---------- */
 const stage = $('globe-stage');
 let renderer, scene, camera, planet;
 let ready = false, legIndex = 0, dirty = true, overview = true, drag = null;
-let phase = 'overview';           // overview | move | play | arrived
+let phase = 'overview';       // overview | move | play | arrived
 let playT0 = 0, playDurMs = 7000, holdE = 1;
 let pausedByHidden = false, hiddenAt = 0;
-let transition = null, lastTime = 0;
-let frameWidth = 1, frameHeight = 1;
+let transition = null;
+let frameWidth = 1, frameHeight = 1, projScale = 1000;
 const trailObjects = [], markerObjects = [];
 const plane = makePlane(), ferry = makeFerry(), car = makeCar();
-const trainCars = [makeTrainCar(true), makeTrainCar(false), makeTrainCar(false)];
-let headGlow = null, smoothScale = 0.05;
+// A long consist swallows a short route, so keep it to a power car plus one coach
+const trainCars = [makeTrainCar(true), makeTrainCar(false)];
+let smoothScale = 0;
 const cameraTarget = new THREE.Vector3();
 
-function patchGeometry(w, s, e, n, segments = 128) {
+function patchGeometry(w, s, e, n, segments = 128, lift = 0.00002) {
   const positions = [], normals = [], uvs = [], indices = [];
   for (let y = 0; y <= segments; y++) for (let x = 0; x <= segments; x++) {
     const u = x / segments, v = y / segments;
-    const p = geo([w + (e - w) * u, s + (n - s) * v], R + 0.000035);
+    const p = geo([w + (e - w) * u, s + (n - s) * v], R + lift);
     positions.push(...p.toArray()); normals.push(...p.clone().normalize().toArray()); uvs.push(u, v);
     if (y < segments && x < segments) { const a = y * (segments + 1) + x, b = a + 1, c = a + segments + 1, d = c + 1; indices.push(a, b, c, b, d, c); }
   }
@@ -260,16 +319,6 @@ function patchGeometry(w, s, e, n, segments = 128) {
   return g;
 }
 
-function glowTexture() {
-  const c = document.createElement('canvas'); c.width = c.height = 128;
-  const ctx = c.getContext('2d');
-  const g = ctx.createRadialGradient(64, 64, 2, 64, 64, 64);
-  g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.4, 'rgba(255,255,255,.4)'); g.addColorStop(1, 'rgba(255,255,255,0)');
-  ctx.fillStyle = g; ctx.fillRect(0, 0, 128, 128);
-  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
-  return t;
-}
-
 async function initialize() {
   try {
     renderer = new THREE.WebGLRenderer({ canvas: $('globe'), alpha: true, antialias: true, powerPreference: 'high-performance' });
@@ -279,46 +328,55 @@ async function initialize() {
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.12;
     scene = new THREE.Scene();
-    camera = new THREE.PerspectiveCamera(36, 1, 0.001, 50);
+    camera = new THREE.PerspectiveCamera(FOV, 1, 0.001, 50);
 
     scene.add(new THREE.HemisphereLight(0xd9ccff, 0x2a2138, 1.55));
     const sun = new THREE.DirectionalLight(0xffe9d2, 2.3); sun.position.set(7, 8, 8); scene.add(sun);
     const rim = new THREE.DirectionalLight(0x9a7fe8, 1.1); rim.position.set(-8, 2, -6); scene.add(rim);
 
     const loader = new THREE.TextureLoader();
-    const maps = await Promise.all(['globe-color-8192.png', 'globe-patch-iberia-morocco.png', 'globe-patch-barcelona.png'].map((f) => loader.loadAsync('./assets/' + f)));
+    // Stacked from coarse to fine: europe, korea, iberia + morocco, barcelona
+    const sheets = [
+      ['globe-patch-europe.png', -15, 25, 32, 58, 160, 0.00002],
+      ['globe-patch-korea.png', 123, 33, 131, 40, 96, 0.00003],
+      ['globe-patch-iberia-morocco.png', -12, 30, 5, 45, 128, 0.00005],
+      ['globe-patch-barcelona.png', 0, 40, 4, 43, 96, 0.00008],
+    ];
+    const maps = await Promise.all(['globe-color-8192.png', ...sheets.map((s) => s[0])].map((f) => loader.loadAsync('./assets/' + f)));
     maps.forEach((t) => { t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy()); });
     const globeMat = (map) => new THREE.MeshStandardMaterial({ map, roughness: 0.9, metalness: 0, color: 0xcdbfe8 });
     planet = new THREE.Mesh(new THREE.SphereGeometry(R, 256, 192), globeMat(maps[0]));
     scene.add(planet);
-    const regional = new THREE.Mesh(patchGeometry(-12, 30, 5, 45), globeMat(maps[1])); regional.renderOrder = 1; scene.add(regional);
-    const localGeometry = patchGeometry(0, 40, 4, 43, 96); localGeometry.scale(1.000008, 1.000008, 1.000008);
-    const local = new THREE.Mesh(localGeometry, globeMat(maps[2])); local.renderOrder = 2; scene.add(local);
+    sheets.forEach(([, w, s, e, n, seg, lift], i) => {
+      const patch = new THREE.Mesh(patchGeometry(w, s, e, n, seg, lift), globeMat(maps[i + 1]));
+      patch.renderOrder = i + 1;
+      scene.add(patch);
+    });
 
     const atmo = new THREE.Mesh(
       new THREE.SphereGeometry(R * 1.03, 96, 64),
       new THREE.ShaderMaterial({
         uniforms: { glow: { value: new THREE.Color('#a584f0') } },
         vertexShader: 'varying vec3 vN; varying vec3 vV; void main(){ vN = normalize(normalMatrix * normal); vec4 mv = modelViewMatrix * vec4(position, 1.); vV = normalize(-mv.xyz); gl_Position = projectionMatrix * mv; }',
-        fragmentShader: 'uniform vec3 glow; varying vec3 vN; varying vec3 vV; void main(){ float rim = pow(1. - abs(dot(normalize(vN), normalize(vV))), 3.2); gl_FragColor = vec4(glow, 1.) * rim * .55;\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}',
-        transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.BackSide,
+        fragmentShader: 'uniform vec3 glow; varying vec3 vN; varying vec3 vV; void main(){ float rim = pow(1. - abs(dot(normalize(vN), normalize(vV))), 3.2); gl_FragColor = vec4(glow, 1.) * rim * .5;\n#include <colorspace_fragment>\n}',
+        transparent: true, depthWrite: false, toneMapped: false, blending: THREE.AdditiveBlending, side: THREE.BackSide,
       })
     );
-    atmo.renderOrder = 5; scene.add(atmo);
+    atmo.renderOrder = 9; scene.add(atmo);
 
     legs.forEach((leg) => {
       leg.curve = new TravelCurve(leg);
       leg.length = leg.curve.getLength();
       leg.angle = leg.curve.angle;
       const trail = makeTrail(leg.curve, MODE[leg.mode].color);
-      scene.add(trail.halo, trail.core); trailObjects.push(trail);
+      scene.add(trail.mesh); trailObjects.push(trail);
     });
 
-    // 마커: 링 없음. 화면 고정 크기의 작은 점만.
     for (const [id, p] of Object.entries(places)) {
-      const dot = mesh(new THREE.SphereGeometry(1, 14, 10), new THREE.MeshBasicMaterial({ color: 0x9d8fc2 }));
+      const dot = mesh(new THREE.SphereGeometry(1, 16, 12), new THREE.MeshBasicMaterial({ color: 0x6b5f8c, toneMapped: false }));
       const normal = geo(p.ll, 1);
-      dot.position.copy(normal).multiplyScalar(R + 0.002);
+      dot.position.copy(normal).multiplyScalar(R + LIFT);
+      dot.renderOrder = 6;
       scene.add(dot);
       const label = document.createElement('div');
       label.className = 'map-label';
@@ -332,21 +390,17 @@ async function initialize() {
     plane.visible = ferry.visible = car.visible = false;
     trainCars.forEach((c) => (c.visible = false));
 
-    headGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture(), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.55 }));
-    headGlow.scale.setScalar(0.03); headGlow.visible = false; scene.add(headGlow);
-
     new ResizeObserver(resize).observe(stage);
     resize();
     buildNav();
-    // 첫 화면: 자유 지구본 (자동재생 없음)
+    // Opening state is a free globe with no autoplay
     const n = geo([16, 40], 1);
     camera.position.copy(n.multiplyScalar(5.6));
     cameraTarget.set(0, 0, 0); camera.up.set(0, 1, 0); camera.lookAt(cameraTarget);
     overview = true; phase = 'overview'; holdE = 1;
     ready = true;
     $('loading').classList.add('done');
-    updateNav(); updateScene(1, performance.now()); updateLabels();
-    renderer.render(scene, camera);
+    updateNav();
     requestAnimationFrame(frame);
   } catch (error) {
     console.error('Globe initialization failed', error);
@@ -358,14 +412,21 @@ function resize() {
   frameWidth = stage.clientWidth; frameHeight = stage.clientHeight;
   renderer.setSize(frameWidth, frameHeight, false);
   camera.aspect = frameWidth / frameHeight; camera.updateProjectionMatrix();
+  screenRes.set(frameWidth, frameHeight);
+  projScale = (frameHeight * 0.5) / TAN_HALF;   // converts world size to screen pixels
   dirty = true;
 }
 
-/* ---------- 프레이밍 밴드: 지상은 절대 바짝 안 들어감 ---------- */
+/* ---------- Framing ----------
+ * Solve for the altitude at which a route of length L fills the target share
+ * of the screen: visible height = 2 * alt * tan(fov/2), so alt = L / (share *
+ * 2 * tan(fov/2)). Then raise it to the region's texture floor. */
 function bandFor(leg) {
-  if (leg.mode === 'flight') return { alt: clamp(leg.angle * 2.0, 0.95, 2.4), descend: 0.25 };
-  if (leg.mode === 'ferry') return { alt: clamp(leg.length * 2.2, 0.40, 0.62), descend: 0 };
-  return { alt: clamp(leg.length * 1.7, 0.32, 0.55), descend: 0 };
+  const share = leg.mode === 'flight' ? 0.68 : 0.28;
+  return {
+    alt: clamp(leg.length / (share * 2 * TAN_HALF), 0.08, 6.5),
+    descend: leg.mode === 'flight' ? 0.22 : 0,
+  };
 }
 
 function getPose(leg, e) {
@@ -374,13 +435,14 @@ function getPose(leg, e) {
   let focus;
   if (leg.mode === 'flight') {
     focus = slerp(leg.curve.a, leg.curve.b, 0.5 + (e - 0.5) * 0.5);
-    const arrival = smoother(clamp((e - 0.7) / 0.3, 0, 1));
-    return aim(focus, alt * (1 - descend * arrival));
+  } else {
+    const mid = leg.curve.getPointAt(0.5).normalize();
+    const here = leg.curve.getPointAt(e).normalize();
+    focus = mid.clone().lerp(here, 0.35).normalize();
   }
-  const mid = leg.curve.getPointAt(0.5).normalize();
-  const here = leg.curve.getPointAt(e).normalize();
-  focus = mid.clone().lerp(here, 0.35).normalize();
-  return aim(focus, alt);
+  const arrival = descend ? smoother(clamp((e - 0.7) / 0.3, 0, 1)) : 0;
+  const wanted = alt * (1 - descend * arrival);
+  return aim(focus, Math.max(wanted, minAltitudeAt(focus)));
 }
 
 function aim(focus, altitude) {
@@ -401,56 +463,46 @@ function beginTransition(pose, duration, onComplete) {
   dirty = true;
 }
 
-function rawProgress(now) {
-  if (phase !== 'play') return holdE;
-  return clamp((now - playT0) / playDurMs, 0, 1);
-}
-function travelEased(now) {
-  const p = rawProgress(now);
-  return smoother(clamp((p - 0.055) / 0.87, 0, 1));
-}
+function rawProgress(now) { return phase === 'play' ? clamp((now - playT0) / playDurMs, 0, 1) : holdE; }
+function travelEased(now) { return smoother(clamp((rawProgress(now) - 0.055) / 0.87, 0, 1)); }
+function currentE(now) { return overview ? 1 : phase === 'play' ? travelEased(now) : holdE; }
 
-/* ---------- 1회성 애니메이션: 보고 나면 자유 지구본으로 복귀 ---------- */
+/* ---------- A leg plays once, then control goes back to the user ---------- */
 function setLeg(i) {
   legIndex = clamp(i, 0, legs.length - 1);
   overview = false; holdE = 0; smoothScale = 0;
   updateNav();
   if (!ready) return;
   phase = 'move';
-  updateScene(0, performance.now());
-  beginTransition(getPose(legs[legIndex], 0), 1300, () => startPlay());
+  beginTransition(getPose(legs[legIndex], 0), 1300, startPlay);
 }
-
 function startPlay() {
-  if (!ready || phase === 'play') return;
+  if (!ready) return;
   overview = false; transition = null;
   phase = 'play'; holdE = 0;
   playT0 = performance.now(); playDurMs = legs[legIndex].duration * 1000;
   updateNav(); dirty = true;
 }
-
-// 자연 종료든 사용자 중단이든: 그 자리에서 멈추고 자유 조작으로
 function settlePlay(now, finished) {
   holdE = finished ? 1 : travelEased(now);
   phase = 'arrived';
   updateNav(); dirty = true;
 }
-
 function setOverview() {
   if (!ready) return;
   phase = 'move'; overview = true;
   const n = geo([16, 40], 1);
-  beginTransition({ position: n.multiplyScalar(5.6), target: new THREE.Vector3(), up: new THREE.Vector3(0, 1, 0) }, 1200, () => { phase = 'overview'; holdE = 1; updateNav(); });
+  beginTransition({ position: n.multiplyScalar(5.6), target: new THREE.Vector3(), up: new THREE.Vector3(0, 1, 0) }, 1200,
+    () => { phase = 'overview'; holdE = 1; updateNav(); });
   updateNav();
 }
 
-/* ---------- 최소 내비게이션 ---------- */
 function buildNav() {
   const dots = $('nav-dots');
   legs.forEach((leg, i) => {
     const b = document.createElement('button');
     b.type = 'button'; b.className = 'nav-dot';
-    b.setAttribute('aria-label', places[leg.from].name + '에서 ' + places[leg.to].name + '까지 (' + MODE[leg.mode].name + ')');
+    b.setAttribute('aria-label', places[leg.from].name + UI.from + places[leg.to].name + UI.to + '(' + MODE[leg.mode].name + ')');
     b.addEventListener('click', () => setLeg(i));
     dots.append(b);
   });
@@ -465,15 +517,17 @@ function updateNav() {
     dots[i].classList.toggle('is-past', i < legIndex);
   }
   const leg = legs[legIndex];
-  $('nav-caption').innerHTML = overview ? '자유롭게 돌려보세요' : '<b>' + places[leg.from].name + ' → ' + places[leg.to].name + '</b> · ' + MODE[leg.mode].name;
+  $('nav-caption').innerHTML = overview
+    ? UI.free
+    : '<b>' + places[leg.from].name + UI.arrow + places[leg.to].name + '</b>' + UI.middot + MODE[leg.mode].name;
   dirty = true;
 }
 
-/* ---------- 배치 ---------- */
+/* ---------- Placing the vehicles ---------- */
 const modelLength = { flight: 1.23, train: 0.48, ferry: 1.05, car: 0.55 };
-const screenFraction = { flight: 0.062, train: 0.045, ferry: 0.05, car: 0.042 };
+// Share of screen height one model should take up, tuned to stay legible on a laptop
+const screenFraction = { flight: 0.062, train: 0.035, ferry: 0.05, car: 0.05 };
 const clearance = { flight: 0.16, train: 0.04, ferry: 0.12, car: 0.04 };
-const fovTan = Math.tan(THREE.MathUtils.degToRad(18));
 
 function orient(obj, point, tangent, bank = 0) {
   const up = point.clone().normalize();
@@ -490,12 +544,7 @@ function targetScale(leg, t) {
   const pose = getPose(leg, t);
   const point = leg.curve.getPointAt(t);
   const distance = Math.max(pose.position.distanceTo(point), 0.02);
-  let scale = (distance * 2 * fovTan * screenFraction[leg.mode]) / modelLength[leg.mode];
-  if (leg.mode === 'train') {
-    const consist = scale * modelLength.train * 2.6;
-    const limit = Math.max(leg.length * 0.2, 0.004);
-    if (consist > limit) scale *= limit / consist;
-  }
+  let scale = (distance * 2 * TAN_HALF * screenFraction[leg.mode]) / modelLength[leg.mode];
   if (leg.mode === 'flight') {
     const limit = Math.max(leg.length * 0.08, 0.01);
     if (scale * modelLength.flight > limit) scale = limit / modelLength.flight;
@@ -503,27 +552,21 @@ function targetScale(leg, t) {
   return scale;
 }
 
-function currentE(now) {
-  if (overview) return 1;
-  if (phase === 'play') return travelEased(now);
-  return holdE;
-}
-
 function updateScene(e, now) {
   const leg = legs[legIndex];
-  const showVehicle = !overview && (phase === 'play' || phase === 'move' || phase === 'arrived');
+  const show = !overview;
   const isFlight = leg.mode === 'flight', isTrain = leg.mode === 'train', isFerry = leg.mode === 'ferry', isCar = leg.mode === 'car';
-  plane.visible = showVehicle && isFlight; ferry.visible = showVehicle && isFerry; car.visible = showVehicle && isCar;
-  trainCars.forEach((m) => (m.visible = showVehicle && isTrain));
+  plane.visible = show && isFlight; ferry.visible = show && isFerry; car.visible = show && isCar;
+  trainCars.forEach((m) => (m.visible = show && isTrain));
 
-  if (showVehicle) {
+  if (show) {
     const point = leg.curve.getPointAt(e);
     const ts = targetScale(leg, e);
-    smoothScale += (ts - smoothScale) * 0.12;
-    const scale = smoothScale || ts, c = clearance[leg.mode];
+    smoothScale = smoothScale ? smoothScale + (ts - smoothScale) * 0.15 : ts;
+    const scale = smoothScale, c = clearance[leg.mode];
     if (isTrain) {
       trainCars.forEach((m, i) => {
-        const u = e - (i * scale * modelLength.train * 1.15) / Math.max(leg.length, 0.001);
+        const u = e - (i * scale * modelLength.train * 1.1) / Math.max(leg.length, 0.001);
         m.visible = u >= -0.001;
         const p = leg.curve.getPointAt(clamp(u, 0, 1));
         seat(m, p, scale, c); orient(m, p, leg.curve.getTangentAt(clamp(u, 0.001, 0.999)));
@@ -533,36 +576,22 @@ function updateScene(e, now) {
       seat(model, point, scale, c);
       orient(model, point, leg.curve.getTangentAt(clamp(e, 0.001, 0.999)), isFlight ? Math.sin(e * Math.PI * 2) * 0.065 : 0);
     }
-    headGlow.visible = phase === 'play';
-    headGlow.position.copy(point).addScaledVector(point.clone().normalize(), 0.008);
-    headGlow.material.color.set(MODE[leg.mode].color);
-    headGlow.scale.setScalar(clamp(camera.position.distanceTo(point) * 0.012, 0.008, 0.06));
-  } else {
-    headGlow.visible = false;
   }
 
   trailObjects.forEach((trail, i) => {
     const active = i === legIndex && !overview;
-    trail.halo.visible = trail.core.visible = overview || i <= legIndex;
     trail.setProgress(active ? e : 1);
-    // 화면 기준 얇기: 각 선의 중점까지 거리에 비례해 굵기 보정
-    const mid = legs[i].curve.getPointAt(0.5);
-    const d = camera.position.distanceTo(mid);
-    trail.setRadius(clamp(d * 0.0011, 0.0006, 0.0035));
-    if (overview) trail.setStyle(0.45, 0.18, true);
-    else if (active) trail.setStyle(0.95, 0.35, false);
-    else trail.setStyle(0.30, 0.12, true);
+    if (active) trail.setStyle(1.0, 0.95, false);
+    else trail.setStyle(0.7, overview ? 0.62 : 0.4, true);
   });
 
-  // 마커: 화면 고정 크기 점. 링 없음.
+  // Dots stay 3 px across and sit at the route's own altitude, so they never drift off the line
   markerObjects.forEach((m) => {
-    const d = camera.position.distanceTo(m.dot.position);
-    const s = clamp(d * 0.0016, 0.0012, 0.012);
-    m.dot.scale.setScalar(s);
+    const dist = camera.position.distanceTo(m.dot.position);
+    m.dot.scale.setScalar((3.0 * dist) / projScale);
     const endpoint = !overview && (m.id === leg.from || m.id === leg.to);
-    const seen = overview && legs.slice(0, legIndex + 1).some((l) => l.from === m.id || l.to === m.id);
-    m.dot.visible = overview ? seen : endpoint;
-    m.dot.material.color.set(!overview && m.id === leg.to ? 0xf0a080 : !overview && m.id === leg.from ? 0xcfc3ee : 0x8f81b5);
+    m.dot.visible = overview || endpoint;
+    m.dot.material.color.set(!overview && m.id === leg.to ? 0xe08a63 : 0x6b5f8c);
     m.priority = !overview && m.id === leg.to ? 2 : !overview && m.id === leg.from ? 1 : 0;
     m.show = m.dot.visible;
   });
@@ -577,12 +606,12 @@ function updateLabels() {
     if (m.normal.dot(toward) < 0.02) { m.label.style.opacity = '0'; continue; }
     const p = m.dot.position.clone().project(camera);
     if (p.z > 1 || p.z < -1 || Math.abs(p.x) > 1.05 || Math.abs(p.y) > 1.05) { m.label.style.opacity = '0'; continue; }
-    candidates.push({ m, x: ((p.x + 1) * frameWidth) / 2, y: ((-p.y + 1) * frameHeight) / 2 - 14 });
+    candidates.push({ m, x: ((p.x + 1) * frameWidth) / 2, y: ((-p.y + 1) * frameHeight) / 2 - 12 });
   }
+  // On a collision keep the destination and hide the rest
   candidates.sort((a, b) => (b.m.priority - a.m.priority) || (a.y - b.y));
   const accepted = [];
   for (const cand of candidates) {
-    // 출발·도착이 화면에서 붙어 있으면 도착지만 표시 (몬세라트/바르셀로나 겹침 해결)
     const clash = accepted.some((k) => Math.abs(k.y - cand.y) < 30 && Math.abs(k.x - cand.x) < 110);
     if (clash) { cand.m.label.style.opacity = '0'; continue; }
     accepted.push(cand);
@@ -594,10 +623,9 @@ function updateLabels() {
 
 function frame(now) {
   requestAnimationFrame(frame);
-  lastTime = now;
   if (document.hidden || !ready) return;
   const playing = phase === 'play';
-  let changed = dirty || playing || !!transition;
+  const changed = dirty || playing || !!transition;
 
   if (transition) {
     const tx = transition;
@@ -617,33 +645,23 @@ function frame(now) {
     const nearH = Math.max(0.003, camera.position.length() - R);
     camera.near = clamp(nearH * 0.012, 0.0001, 0.05);
     camera.updateProjectionMatrix();
-    const e = currentE(now);
-    // 재생·전이 중이 아니면 카메라를 건드리지 않음 (자유 지구본 유지)
-    updateScene(e, now);
+    updateScene(currentE(now), now);
     updateLabels();
     renderer.render(scene, camera);
     dirty = false;
   }
 }
 
-function holdPose(e) {
-  if (overview) {
-    const n = geo([16, 40], 1);
-    return { position: n.multiplyScalar(5.6), target: new THREE.Vector3(), up: new THREE.Vector3(0, 1, 0) };
-  }
-  return getPose(legs[legIndex], e);
-}
 function applyPose(pose) {
   camera.position.copy(pose.position); cameraTarget.copy(pose.target); camera.up.copy(pose.up);
   camera.lookAt(cameraTarget);
 }
 
-/* ---------- 입력: 항상 자유. 재생·이동 중 손대면 즉시 중단하고 넘겨줌 ---------- */
+/* ---------- Input is always live; touching the globe mid-playback hands over control ---------- */
 const canvas = $('globe');
 function userTakeover() {
-  const now = performance.now();
-  if (phase === 'play') settlePlay(now, false);
-  if (transition) { transition = null; if (phase === 'move') { phase = 'arrived'; holdE = 0; } }
+  if (phase === 'play') settlePlay(performance.now(), false);
+  if (transition) { transition = null; if (phase === 'move') phase = 'arrived'; }
   dirty = true;
 }
 canvas.addEventListener('pointerdown', (e) => {
@@ -663,7 +681,11 @@ canvas.addEventListener('pointermove', (e) => {
   camera.position.applyQuaternion(yaw).applyQuaternion(pitch);
   cameraTarget.applyQuaternion(yaw).applyQuaternion(pitch);
   camera.up.applyQuaternion(yaw).applyQuaternion(pitch);
-  camera.lookAt(cameraTarget); dirty = true;
+  // Spinning toward a low-resolution region pushes the camera back to its floor
+  const floor = R + minAltitudeAt(camera.position);
+  if (camera.position.length() < floor) camera.position.setLength(floor);
+  camera.lookAt(cameraTarget);
+  dirty = true;
 });
 function endDrag() { drag = null; canvas.classList.remove('dragging'); }
 canvas.addEventListener('pointerup', endDrag);
@@ -675,18 +697,17 @@ canvas.addEventListener('wheel', (e) => {
   const offset = camera.position.clone().sub(cameraTarget);
   offset.multiplyScalar(Math.exp(clamp(e.deltaY, -100, 100) * 0.0015));
   const candidate = cameraTarget.clone().add(offset);
-  // 래스터가 깨지는 수준까지는 절대 못 들어감
-  if (candidate.length() > R + 0.15 && candidate.length() < 12) {
+  const floor = R + minAltitudeAt(candidate);
+  if (candidate.length() > floor && candidate.length() < 12) {
     camera.position.copy(candidate); camera.lookAt(cameraTarget); dirty = true;
   }
 }, { passive: false });
 
-/* ---------- 탭 전환: wall-clock 보정으로 중간 멈춤 방지 ---------- */
+/* ---------- Tab switches: absorb the elapsed gap so playback does not jump ---------- */
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     if (phase === 'play') { pausedByHidden = true; hiddenAt = performance.now(); }
   } else {
-    lastTime = 0;
     if (pausedByHidden) {
       const gap = performance.now() - hiddenAt;
       playT0 += gap;
@@ -700,13 +721,12 @@ canvas.addEventListener('webglcontextlost', (e) => {
   e.preventDefault();
   phase = 'arrived'; holdE = 1;
   $('map-error').hidden = false;
-  $('map-error').textContent = '지구본이 잠시 멈췄어요. 페이지를 새로 열어주세요.';
+  $('map-error').textContent = UI.contextLost;
 });
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Space' && e.target === document.body) {
     e.preventDefault();
-    if (phase === 'play') settlePlay(performance.now(), false);
-    else setLeg(legIndex);
+    if (phase === 'play') settlePlay(performance.now(), false); else setLeg(legIndex);
   }
   if (e.code === 'ArrowRight') setLeg((legIndex + 1) % legs.length);
   if (e.code === 'ArrowLeft') setLeg((legIndex + legs.length - 1) % legs.length);
